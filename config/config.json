@@ -1,0 +1,30 @@
+{
+  "confidence_threshold": 0.35,
+  "iou_threshold": 0.45,
+  "near_area_ratio": 0.2,
+  "medium_area_ratio": 0.08,
+  "warning_cooldown_seconds": 2.5,
+  "speech_rate": 155,
+  "silent_classes": [
+    "Road",
+    "Building"
+  ],
+  "danger_weights": {
+    "Car": 1.0,
+    "Truck": 1.0,
+    "Bus": 1.0,
+    "Motorcycle": 0.95,
+    "Bike": 0.85,
+    "Stairs": 1.0,
+    "Electrical Pole": 0.9,
+    "Traffic Cone": 0.8,
+    "Teraffic Barrel": 0.85,
+    "Manhole": 1.0,
+    "Person": 0.75,
+    "Dog": 0.7,
+    "Bench": 0.7,
+    "Chair": 0.65,
+    "Bicycle Rack": 0.75
+  }
+}
+
