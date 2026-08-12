@@ -36,11 +36,10 @@ class AudioFeedback:
             detection["position"],
         )
 
-    def speak(self, detection):
-        if not self.enabled or detection is None:
+    def speak_phrase(self, phrase):
+        if not self.enabled or not phrase:
             return False
 
-        phrase = self.phrase_for(detection)
         now = time.monotonic()
 
         if now - self.last_spoken_at < self.cooldown_seconds:
@@ -70,7 +69,11 @@ class AudioFeedback:
         self.last_spoken_at = now
         return True
 
+    def speak(self, detection):
+        if detection is None:
+            return False
+        return self.speak_phrase(self.phrase_for(detection))
+
     def close(self):
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
-

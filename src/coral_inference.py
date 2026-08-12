@@ -10,6 +10,7 @@ import time
 import cv2
 
 from audio_feedback import AudioFeedback
+from camera_source import open_camera
 from model_utils import load_interpreter, run_inference
 from spatial_reasoning import (
     object_position,
@@ -40,7 +41,14 @@ def parse_args():
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--labels", type=Path, default=DEFAULT_LABELS)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument(
+        "--camera",
+        default="0",
+        help="Local camera index or HTTP/RTSP Wi-Fi stream URL.",
+    )
+    parser.add_argument("--camera-width", type=int, default=640)
+    parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument("--camera-fps", type=int, default=15)
     parser.add_argument("--confidence", type=float)
     parser.add_argument("--display", action="store_true")
     parser.add_argument("--no-audio", action="store_true")
@@ -146,13 +154,15 @@ def main():
     if audio.enabled and not audio.available:
         print("espeak was not found; warnings will be printed only.")
 
-    camera = cv2.VideoCapture(args.camera)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    camera = open_camera(
+        args.camera,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+    )
 
     if not camera.isOpened():
-        print("Could not open camera index {}.".format(args.camera))
+        print("Could not open camera source {}.".format(args.camera))
         audio.close()
         return 1
 
@@ -227,4 +237,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

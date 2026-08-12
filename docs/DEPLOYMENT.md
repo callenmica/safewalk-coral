@@ -65,6 +65,16 @@ ls -l /dev/video*
 
 If the camera is `/dev/video1`, use `--camera 1`.
 
+To use an iPhone instead, start an HTTP MJPEG or RTSP camera-server app and
+connect the phone and board to the same Wi-Fi. Use the app's direct video URL:
+
+```bash
+bash scripts/run_dashboard.sh --camera "http://192.168.1.50:8080/video"
+```
+
+If the app displays a browser control page, find its direct MJPEG/RTSP stream
+URL; an HTML page cannot be decoded as video.
+
 ## 6. Test audio
 
 Connect earphones or a supported speaker, then run:
@@ -97,6 +107,12 @@ bash scripts/run_safewalk.sh --display
 The application announces one prioritized warning at a time and applies a
 cooldown so speech does not repeat every frame.
 
+Enhanced Coral dashboard with two-hazard speech and spatial guidance:
+
+```bash
+bash scripts/run_dashboard.sh --camera 0
+```
+
 ## Troubleshooting
 
 ### The model file is missing
@@ -122,4 +138,3 @@ the raw YOLOv8 detection output expected by `src/model_utils.py`.
 Review the Edge TPU compiler output. Unsupported operations run on the CPU and
 can sharply reduce FPS. A Coral-native detector such as EfficientDet-Lite is
 the fallback if YOLOv8 cannot be mapped sufficiently to the TPU.
-
