@@ -579,15 +579,17 @@ def main():
         del flags, userdata
         if event != cv2.EVENT_LBUTTONDOWN:
             return
-        try:
-            _, _, display_width, display_height = cv2.getWindowImageRect(
-                WINDOW_NAME
-            )
-            if display_width > 0 and display_height > 0:
-                mouse_x = int(mouse_x * WINDOW_WIDTH / display_width)
-                mouse_y = int(mouse_y * WINDOW_HEIGHT / display_height)
-        except cv2.error:
-            pass
+        get_window_rect = getattr(cv2, "getWindowImageRect", None)
+        if get_window_rect is not None:
+            try:
+                _, _, display_width, display_height = get_window_rect(
+                    WINDOW_NAME
+                )
+                if display_width > 0 and display_height > 0:
+                    mouse_x = int(mouse_x * WINDOW_WIDTH / display_width)
+                    mouse_y = int(mouse_y * WINDOW_HEIGHT / display_height)
+            except cv2.error:
+                pass
         for action, rect in regions.items():
             x1, y1, x2, y2 = rect
             if x1 <= mouse_x <= x2 and y1 <= mouse_y <= y2:
