@@ -7,13 +7,14 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sys
+import threading
 import time
 
 import cv2
 import numpy as np
 
 from audio_feedback import AudioFeedback
-from camera_source import open_camera
+from camera_source import LatestFrameCamera
 from model_utils import load_interpreter, run_inference
 from spatial_reasoning import (
     CollisionTracker,
@@ -83,6 +84,7 @@ def parse_args():
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
     parser.add_argument("--camera-fps", type=int, default=15)
+    parser.add_argument("--ui-fps", type=float, default=10.0)
     parser.add_argument("--confidence", type=float)
     parser.add_argument("--no-audio", action="store_true")
     return parser.parse_args()
@@ -525,6 +527,159 @@ def build_dashboard(
     return canvas
 
 
+def empty_inference_result(result_id=0):
+    return {
+        "result_id": result_id,
+        "frame": None,
+        "detections": [],
+        "ranked": [],
+        "route_text": "PATH CLEAR",
+        "route_position": "centre",
+        "low_light": False,
+        "collision": False,
+        "inference_ms": 0.0,
+    }
+
+
+class DashboardInferenceWorker:
+    """Run Edge TPU inference without blocking dashboard input events."""
+
+    def __init__(
+        self,
+        interpreter,
+        labels,
+        config,
+        confidence,
+        audio,
+        camera=None,
+    ):
+        self.interpreter = interpreter
+        self.labels = labels
+        self.config = config
+        self.audio = audio
+        self._confidence = confidence
+        self._camera = camera
+        self._generation = 0
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._result = empty_inference_result()
+        self._thread = threading.Thread(target=self._run)
+        self._thread.daemon = True
+
+    def start(self):
+        self._thread.start()
+
+    def set_camera(self, camera):
+        with self._lock:
+            self._camera = camera
+            self._generation += 1
+            next_id = self._result["result_id"] + 1
+            self._result = empty_inference_result(next_id)
+
+    def set_confidence(self, confidence):
+        with self._lock:
+            self._confidence = confidence
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._result)
+
+    def _run(self):
+        active_generation = -1
+        last_sequence = -1
+        collision_tracker = CollisionTracker()
+
+        while not self._stop_event.is_set():
+            with self._lock:
+                camera = self._camera
+                generation = self._generation
+                confidence = self._confidence
+
+            if generation != active_generation:
+                active_generation = generation
+                last_sequence = -1
+                collision_tracker = CollisionTracker()
+
+            if camera is None:
+                time.sleep(0.02)
+                continue
+
+            sequence, frame, _, camera_running = camera.snapshot()
+            if not camera_running or frame is None or sequence == last_sequence:
+                time.sleep(0.01)
+                continue
+            last_sequence = sequence
+
+            try:
+                low_light = (
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean() < 40.0
+                )
+                inference_start = time.perf_counter()
+                detections = run_inference(
+                    interpreter=self.interpreter,
+                    frame=frame,
+                    labels=self.labels,
+                    confidence_threshold=confidence,
+                    iou_threshold=self.config["iou_threshold"],
+                )
+                inference_ms = (
+                    time.perf_counter() - inference_start
+                ) * 1000.0
+                detections = enrich_detections(
+                    detections,
+                    frame,
+                    self.config,
+                )
+                ranked = rank_hazards(
+                    detections,
+                    danger_weights=self.config["danger_weights"],
+                    silent_classes=self.config["silent_classes"],
+                )
+                frame_height, frame_width = frame.shape[:2]
+                collision = collision_tracker.update(
+                    ranked,
+                    frame_width,
+                    frame_height,
+                )
+                route_text, route_position, _ = escape_route(
+                    ranked,
+                    silent_classes=self.config["silent_classes"],
+                )
+                self.audio.speak_phrase(
+                    warning_phrase(
+                        ranked,
+                        route_text,
+                        low_light,
+                        collision,
+                    )
+                )
+            except Exception as error:
+                print("Inference error: {}".format(error))
+                time.sleep(0.05)
+                continue
+
+            with self._lock:
+                if generation != self._generation:
+                    continue
+                result_id = self._result["result_id"] + 1
+                self._result = {
+                    "result_id": result_id,
+                    "frame": frame,
+                    "detections": detections,
+                    "ranked": ranked,
+                    "route_text": route_text,
+                    "route_position": route_position,
+                    "low_light": low_light,
+                    "collision": collision,
+                    "inference_ms": inference_ms,
+                }
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
 def main():
     args = parse_args()
     for required_path in (args.model, args.labels, args.config):
@@ -542,15 +697,15 @@ def main():
 
     print("Loading real Edge TPU model:", args.model)
     interpreter = load_interpreter(args.model)
-    camera = open_camera(
+    camera = LatestFrameCamera(
         args.camera,
         width=args.camera_width,
         height=args.camera_height,
         fps=args.camera_fps,
     )
-    camera_running = camera.isOpened()
+    camera_running = camera.start()
     if not camera_running:
-        camera.release()
+        camera.stop()
         camera = None
 
     audio = AudioFeedback(
@@ -558,7 +713,15 @@ def main():
         speech_rate=config["speech_rate"],
         enabled=not args.no_audio,
     )
-    collision_tracker = CollisionTracker()
+    inference_worker = DashboardInferenceWorker(
+        interpreter=interpreter,
+        labels=labels,
+        config=config,
+        confidence=confidence,
+        audio=audio,
+        camera=camera,
+    )
+    inference_worker.start()
     latency_history = deque(maxlen=40)
     regions = {}
     pending_action = [None]
@@ -571,8 +734,7 @@ def main():
     collision = False
     inference_ms = 0.0
     raw_fps = 0.0
-    previous_frame_time = time.monotonic()
-    failed_reads = 0
+    last_result_id = -1
     quit_requested = False
 
     def on_mouse(event, mouse_x, mouse_y, flags, userdata):
@@ -602,6 +764,7 @@ def main():
 
     try:
         while not quit_requested:
+            loop_started = time.monotonic()
             action = pending_action[0]
             pending_action[0] = None
             if action == "quit":
@@ -610,93 +773,50 @@ def main():
                 audio.enabled = not audio.enabled
             elif action == "confidence_down":
                 confidence = max(0.10, confidence - 0.05)
+                inference_worker.set_confidence(confidence)
             elif action == "confidence_up":
                 confidence = min(0.90, confidence + 0.05)
+                inference_worker.set_confidence(confidence)
             elif action == "camera":
                 if camera_running:
-                    camera.release()
+                    inference_worker.set_camera(None)
+                    camera.stop()
                     camera = None
                     camera_running = False
                 else:
-                    camera = open_camera(
+                    camera = LatestFrameCamera(
                         args.camera,
                         width=args.camera_width,
                         height=args.camera_height,
                         fps=args.camera_fps,
                     )
-                    camera_running = camera.isOpened()
+                    camera_running = camera.start()
                     if not camera_running:
-                        camera.release()
+                        camera.stop()
                         camera = None
-                    failed_reads = 0
+                    else:
+                        inference_worker.set_camera(camera)
 
-            if camera_running and camera is not None:
-                success, frame = camera.read()
-                if success:
-                    failed_reads = 0
-                    now = time.monotonic()
-                    instantaneous_fps = 1.0 / max(
-                        0.0001,
-                        now - previous_frame_time,
-                    )
-                    raw_fps = (
-                        instantaneous_fps
-                        if raw_fps == 0.0
-                        else raw_fps * 0.85 + instantaneous_fps * 0.15
-                    )
-                    previous_frame_time = now
-                    low_light = (
-                        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean() < 40.0
-                    )
+            if camera is not None:
+                _, _, raw_fps, camera_running = camera.snapshot()
+                if not camera_running:
+                    inference_worker.set_camera(None)
+                    camera.stop()
+                    camera = None
 
-                    inference_start = time.perf_counter()
-                    detections = run_inference(
-                        interpreter=interpreter,
-                        frame=frame,
-                        labels=labels,
-                        confidence_threshold=confidence,
-                        iou_threshold=config["iou_threshold"],
-                    )
-                    inference_ms = (
-                        time.perf_counter() - inference_start
-                    ) * 1000.0
+            inference_result = inference_worker.snapshot()
+            if inference_result["result_id"] != last_result_id:
+                last_result_id = inference_result["result_id"]
+                last_frame = inference_result["frame"]
+                detections = inference_result["detections"]
+                ranked = inference_result["ranked"]
+                route_text = inference_result["route_text"]
+                route_position = inference_result["route_position"]
+                low_light = inference_result["low_light"]
+                collision = inference_result["collision"]
+                inference_ms = inference_result["inference_ms"]
+                if inference_ms > 0.0:
                     latency_history.append(inference_ms)
-                    detections = enrich_detections(
-                        detections,
-                        frame,
-                        config,
-                    )
-                    ranked = rank_hazards(
-                        detections,
-                        danger_weights=config["danger_weights"],
-                        silent_classes=config["silent_classes"],
-                    )
-                    frame_height, frame_width = frame.shape[:2]
-                    collision = collision_tracker.update(
-                        ranked,
-                        frame_width,
-                        frame_height,
-                    )
-                    route_text, route_position, _ = escape_route(
-                        ranked,
-                        silent_classes=config["silent_classes"],
-                    )
-                    audio.speak_phrase(
-                        warning_phrase(
-                            ranked,
-                            route_text,
-                            low_light,
-                            collision,
-                        )
-                    )
-                    last_frame = frame
-                else:
-                    failed_reads += 1
-                    if failed_reads >= 10:
-                        print("Camera stream stopped after repeated read failures.")
-                        camera.release()
-                        camera = None
-                        camera_running = False
 
             dashboard = build_dashboard(
                 last_frame if camera_running else None,
@@ -727,11 +847,17 @@ def main():
                 pending_action[0] = "confidence_down"
             elif key in (ord("+"), ord("=")):
                 pending_action[0] = "confidence_up"
+
+            refresh_interval = 1.0 / max(1.0, args.ui_fps)
+            remaining = refresh_interval - (time.monotonic() - loop_started)
+            if remaining > 0.0:
+                time.sleep(remaining)
     except KeyboardInterrupt:
         print("\nStopping SafeWalk dashboard.")
     finally:
+        inference_worker.stop()
         if camera is not None:
-            camera.release()
+            camera.stop()
         audio.close()
         cv2.destroyAllWindows()
     return 0
