@@ -5,6 +5,8 @@ import numpy as np
 
 from pycoral.utils.edgetpu import make_interpreter
 
+from nms import non_max_suppression
+
 
 def load_interpreter(model_path):
     interpreter = make_interpreter(str(model_path))
@@ -142,25 +144,15 @@ def decode_yolov8(
         boxes_xywh[:, [1, 3]] *= input_height
 
     boxes_xyxy = _xywh_to_xyxy(boxes_xywh)
-    nms_boxes = [
-        [
-            float(box[0]),
-            float(box[1]),
-            float(box[2] - box[0]),
-            float(box[3] - box[1]),
-        ]
-        for box in boxes_xyxy
-    ]
-
-    selected = cv2.dnn.NMSBoxes(
-        nms_boxes,
-        confidences.tolist(),
-        confidence_threshold,
+    selected = non_max_suppression(
+        boxes_xyxy,
+        confidences,
+        class_ids,
         iou_threshold,
     )
 
     detections = []
-    for index in np.array(selected).reshape(-1):
+    for index in selected:
         box = boxes_xyxy[int(index)]
         x1 = int(round((box[0] - pad_x) / scale))
         y1 = int(round((box[1] - pad_y) / scale))
@@ -225,4 +217,3 @@ def run_inference(
         pad_x=pad_x,
         pad_y=pad_y,
     )
-
