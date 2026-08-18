@@ -7,7 +7,9 @@ import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODEL_PATH = PROJECT_ROOT / "models" / "safewalk_edgetpu.tflite"
+MODEL_PATH = (
+    PROJECT_ROOT / "models" / "safewalk_ssd_mobilenet_v2_edgetpu.tflite"
+)
 
 
 def check(label, action):
@@ -78,4 +80,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

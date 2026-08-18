@@ -20,7 +20,9 @@ from spatial_reasoning import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = PROJECT_ROOT / "models" / "safewalk_edgetpu.tflite"
+DEFAULT_MODEL = (
+    PROJECT_ROOT / "models" / "safewalk_ssd_mobilenet_v2_edgetpu.tflite"
+)
 DEFAULT_LABELS = PROJECT_ROOT / "models" / "labels.txt"
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "config.json"
 

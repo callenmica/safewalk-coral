@@ -4,18 +4,20 @@ SafeWalk is an offline obstacle-detection and audio-guidance prototype for the
 Coral Dev Board Mini. A USB camera supplies frames, the on-board Edge TPU runs
 the object detector, and the application announces the highest-priority hazard.
 
-## Important model requirement
+## Deployment model
 
-The Coral Edge TPU cannot run the PyTorch `best.pt` checkpoint directly. Export
-it on Google Colab as a fully quantized Edge TPU model first:
+The original YOLOv8n model remains the project baseline. Its partial Edge TPU
+mapping made it unsuitable for responsive deployment, so the optimized runtime
+uses a custom SSD MobileNet V2 detector trained on the same 25-class ROD
+dataset. The SSD model uses a 300 x 300 UINT8 input and maps 99 of 102
+operations to one Edge TPU subgraph.
 
-1. Open `notebooks/export_edgetpu_colab.ipynb` in Google Colab.
-2. Upload `best.pt` when prompted.
-3. Make sure the ROD dataset and `data.yaml` are available for INT8 calibration.
-4. Run all cells and download the generated file.
-5. Rename the output to `safewalk_edgetpu.tflite` while keeping the
-   `_edgetpu.tflite` suffix.
-6. Place it in `models/` and commit it to this repository.
+The Coral Edge TPU cannot run the PyTorch `best.pt` checkpoint directly. The
+deployment artifact is the fully quantized and compiled model at:
+
+```text
+models/safewalk_ssd_mobilenet_v2_edgetpu.tflite
+```
 
 Edge TPU export must run on x86 Linux. Google Colab is suitable; the ARM-based
 Dev Board Mini is not an export machine.
@@ -31,8 +33,7 @@ cd safewalk-coral
 bash scripts/setup_board.sh
 ```
 
-Copy the exported model into `models/safewalk_edgetpu.tflite`, then verify the
-board:
+Verify the board and optimized model:
 
 ```bash
 python3 src/check_board.py
@@ -48,6 +49,14 @@ Run SafeWalk:
 
 ```bash
 bash scripts/run_safewalk.sh
+```
+
+Run a controlled still-image detection and save an annotated result:
+
+```bash
+python3 src/detect_image.py \
+  --image test_images/benchmark.jpg \
+  --output results/benchmark_detected.jpg
 ```
 
 For a connected HDMI display:

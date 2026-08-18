@@ -1,14 +1,14 @@
-"""Edge TPU preprocessing and YOLOv8 output decoding."""
+"""Edge TPU preprocessing and object-detection output decoding."""
 
 import cv2
 import numpy as np
-
-from pycoral.utils.edgetpu import make_interpreter
 
 from nms import non_max_suppression
 
 
 def load_interpreter(model_path):
+    from pycoral.utils.edgetpu import make_interpreter
+
     interpreter = make_interpreter(str(model_path))
     interpreter.allocate_tensors()
     return interpreter
@@ -45,17 +45,24 @@ def letterbox(frame, target_width, target_height):
 
 def quantize_input(rgb_image, input_detail):
     dtype = input_detail["dtype"]
-    image = rgb_image.astype(np.float32) / 255.0
-
     if dtype == np.float32:
+        image = rgb_image.astype(np.float32) / 255.0
         return image[np.newaxis, ...]
 
     scale, zero_point = input_detail["quantization"]
     if scale <= 0:
         raise ValueError("Model input tensor has invalid quantization metadata.")
 
-    quantized = np.round(image / scale + zero_point)
     limits = np.iinfo(dtype)
+    real_min = (limits.min - zero_point) * scale
+    real_max = (limits.max - zero_point) * scale
+
+    if real_min <= -0.9 and real_max >= 0.9:
+        image = rgb_image.astype(np.float32) / 127.5 - 1.0
+    else:
+        image = rgb_image.astype(np.float32) / 255.0
+
+    quantized = np.round(image / scale + zero_point)
     quantized = np.clip(quantized, limits.min, limits.max).astype(dtype)
     return quantized[np.newaxis, ...]
 
@@ -81,6 +88,113 @@ def _raw_prediction_output(interpreter):
         raise RuntimeError("The model returned no output tensors.")
 
     return max(candidates, key=lambda item: item[0])[1]
+
+
+def model_family(interpreter):
+    details = interpreter.get_output_details()
+    if len(details) == 4:
+        has_boxes = any(
+            len(detail["shape"]) >= 2 and int(detail["shape"][-1]) == 4
+            for detail in details
+        )
+        has_count = any(int(np.prod(detail["shape"])) == 1 for detail in details)
+        if has_boxes and has_count:
+            return "ssd"
+    return "yolov8"
+
+
+def _ssd_output_tensors(interpreter):
+    outputs = []
+    for detail in interpreter.get_output_details():
+        tensor = interpreter.get_tensor(detail["index"])
+        tensor = dequantize_output(tensor, detail)
+        outputs.append((detail, tensor))
+
+    boxes = None
+    count = None
+    vectors = []
+    for detail, tensor in outputs:
+        shape = tensor.shape
+        if tensor.ndim >= 2 and shape[-1] == 4:
+            boxes = tensor
+        elif tensor.size == 1:
+            count = tensor
+        else:
+            vectors.append((detail, tensor))
+
+    if boxes is None or count is None or len(vectors) != 2:
+        raise RuntimeError("Unsupported SSD output tensor layout.")
+
+    classes = None
+    scores = None
+    for detail, tensor in vectors:
+        name = detail.get("name", "").lower()
+        if "class" in name or name.endswith(":1"):
+            classes = tensor
+        elif "score" in name or name.endswith(":2"):
+            scores = tensor
+
+    if classes is None or scores is None:
+        first = vectors[0][1]
+        second = vectors[1][1]
+        first_integer_error = float(np.mean(np.abs(first - np.round(first))))
+        second_integer_error = float(np.mean(np.abs(second - np.round(second))))
+        if first_integer_error <= second_integer_error:
+            classes, scores = first, second
+        else:
+            classes, scores = second, first
+
+    return boxes, classes, scores, count
+
+
+def decode_ssd(
+    boxes,
+    class_ids,
+    scores,
+    num_detections,
+    labels,
+    confidence_threshold,
+    source_width,
+    source_height,
+):
+    boxes = np.asarray(boxes).reshape(-1, 4)
+    class_ids = np.asarray(class_ids).reshape(-1)
+    scores = np.asarray(scores).reshape(-1)
+    count = min(
+        int(round(float(np.asarray(num_detections).reshape(-1)[0]))),
+        len(boxes),
+        len(class_ids),
+        len(scores),
+    )
+
+    detections = []
+    for index in range(max(0, count)):
+        confidence = float(scores[index])
+        if confidence < confidence_threshold:
+            continue
+
+        class_id = int(round(float(class_ids[index])))
+        if class_id < 0 or class_id >= len(labels):
+            continue
+
+        ymin, xmin, ymax, xmax = boxes[index]
+        x1 = max(0, min(source_width - 1, int(round(xmin * source_width))))
+        y1 = max(0, min(source_height - 1, int(round(ymin * source_height))))
+        x2 = max(0, min(source_width - 1, int(round(xmax * source_width))))
+        y2 = max(0, min(source_height - 1, int(round(ymax * source_height))))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        detections.append(
+            {
+                "class_id": class_id,
+                "class": labels[class_id],
+                "confidence": confidence,
+                "box": (x1, y1, x2, y2),
+            }
+        )
+
+    return detections
 
 
 def _xywh_to_xyxy(boxes):
@@ -192,6 +306,29 @@ def run_inference(
     input_height = int(input_shape[1])
     input_width = int(input_shape[2])
     source_height, source_width = frame.shape[:2]
+
+    family = model_family(interpreter)
+    if family == "ssd":
+        resized = cv2.resize(
+            frame,
+            (input_width, input_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        input_tensor = quantize_input(rgb, input_detail)
+        interpreter.set_tensor(input_detail["index"], input_tensor)
+        interpreter.invoke()
+        boxes, class_ids, scores, count = _ssd_output_tensors(interpreter)
+        return decode_ssd(
+            boxes=boxes,
+            class_ids=class_ids,
+            scores=scores,
+            num_detections=count,
+            labels=labels,
+            confidence_threshold=confidence_threshold,
+            source_width=source_width,
+            source_height=source_height,
+        )
 
     padded, scale, pad_x, pad_y = letterbox(
         frame,
