@@ -59,6 +59,15 @@ python3 src/detect_image.py \
   --output results/benchmark_detected.jpg
 ```
 
+Create controlled normal, bright, and low-light variants of the same image and
+save annotated results plus a CSV summary:
+
+```bash
+python3 src/evaluate_lighting.py \
+  --image test_images/benchmark.jpg \
+  --output-dir results/lighting
+```
+
 For a connected HDMI display:
 
 ```bash
