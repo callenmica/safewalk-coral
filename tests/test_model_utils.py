@@ -8,10 +8,70 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from model_utils import decode_ssd, quantize_input  # noqa: E402
+from model_utils import (  # noqa: E402
+    _ssd_output_tensors,
+    decode_ssd,
+    quantize_input,
+)
+
+
+class FakeInterpreter:
+    def __init__(self, outputs):
+        self.outputs = outputs
+
+    def get_output_details(self):
+        return [item[0] for item in self.outputs]
+
+    def get_tensor(self, index):
+        return self.outputs[index][1]
 
 
 class ModelUtilsTests(unittest.TestCase):
+    def test_identifies_scores_when_generic_tensor_suffixes_are_misleading(self):
+        outputs = [
+            (
+                {
+                    "index": 0,
+                    "name": "StatefulPartitionedCall:0",
+                    "shape": np.array([1, 10, 4]),
+                    "quantization": (0.0, 0),
+                },
+                np.zeros((1, 10, 4), dtype=np.float32),
+            ),
+            (
+                {
+                    "index": 1,
+                    "name": "StatefulPartitionedCall:1",
+                    "shape": np.array([1, 10]),
+                    "quantization": (0.0, 0),
+                },
+                np.array([[0.91] + [0.0] * 9], dtype=np.float32),
+            ),
+            (
+                {
+                    "index": 2,
+                    "name": "StatefulPartitionedCall:2",
+                    "shape": np.array([1, 10]),
+                    "quantization": (0.0, 0),
+                },
+                np.array([[18.0] + [0.0] * 9], dtype=np.float32),
+            ),
+            (
+                {
+                    "index": 3,
+                    "name": "StatefulPartitionedCall:3",
+                    "shape": np.array([1]),
+                    "quantization": (0.0, 0),
+                },
+                np.array([1.0], dtype=np.float32),
+            ),
+        ]
+
+        _, classes, scores, _ = _ssd_output_tensors(FakeInterpreter(outputs))
+
+        self.assertEqual(float(classes.reshape(-1)[0]), 18.0)
+        self.assertAlmostEqual(float(scores.reshape(-1)[0]), 0.91, places=5)
+
     def test_quantizes_ssd_minus_one_to_one_input(self):
         image = np.array([[[0, 128, 255]]], dtype=np.uint8)
         detail = {

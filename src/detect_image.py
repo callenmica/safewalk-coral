@@ -48,6 +48,15 @@ def main():
     labels = load_labels(args.labels)
     interpreter = load_interpreter(args.model)
 
+    # The first Edge TPU invocation also loads model parameters into cache.
+    run_inference(
+        interpreter=interpreter,
+        frame=frame,
+        labels=labels,
+        confidence_threshold=args.confidence,
+        iou_threshold=0.45,
+    )
+
     started = time.perf_counter()
     detections = run_inference(
         interpreter=interpreter,

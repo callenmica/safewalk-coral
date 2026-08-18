@@ -129,9 +129,9 @@ def _ssd_output_tensors(interpreter):
     scores = None
     for detail, tensor in vectors:
         name = detail.get("name", "").lower()
-        if "class" in name or name.endswith(":1"):
+        if "class" in name:
             classes = tensor
-        elif "score" in name or name.endswith(":2"):
+        elif "score" in name:
             scores = tensor
 
     if classes is None or scores is None:
